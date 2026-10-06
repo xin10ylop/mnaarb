@@ -5,3 +5,5 @@ data/cache/
 data/raw/
 *.egg-info/
 .ipynb_checkpoints/
+data/*.log
+data/live_monitor.out

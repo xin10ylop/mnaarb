@@ -121,6 +121,22 @@ strat(d_all, "ret_close_d1_close", "cap_close_b", "Buy d0 close, sell d1 close (
 strat(d_all, "ret_close_d5_close", "cap_close_b", "Buy d0 close, sell d5 close - by capture at d0 close (all deals)")
 strat(d_all, "ret_close_d20_close", "consideration", "Buy d0 close, hold 20 days (classic arb start) - by consideration")
 
+# stock-for-stock deals: the arb trade is long target / short ratio x acquirer (hedged)
+sk = d[d.consideration.isin(["stock", "mixed"])]
+if len(sk):
+    cols_h = ["ret_open_hedged_d0_close", "ret_open_hedged_d1_close", "ret_open_hedged_d5_close"]
+    t = sk.set_index("ticker")[["t0", "consideration", "acq_ticker", "premium", "cap_open", "cap_d0_close"] + cols_h]
+    table(t, "Stock / mixed deals: long target at d0 open, short exchange-ratio x acquirer at its open",
+          {"premium": "{:.2f}", "cap_open": "{:.2f}", "cap_d0_close": "{:.2f}"} | {c: "{:.2%}" for c in cols_h})
+    s_ = sk[cols_h].agg(["count", "mean", "median"]).T
+    s_["hit"] = (sk[cols_h] > 0).sum() / sk[cols_h].notna().sum()
+    s_["t"] = sk[cols_h].mean() / (sk[cols_h].std(ddof=1) / np.sqrt(sk[cols_h].notna().sum()))
+    table(s_, "Stock / mixed deals: hedged return summary", {"mean": "{:.2%}", "median": "{:.2%}", "hit": "{:.0%}", "t": "{:.2f}"})
+    cash = d[(d.consideration == "cash")]
+    s2 = cash[["ret_open_d0_close", "ret_open_d1_close", "ret_open_d5_close"]].agg(["count", "mean", "median"]).T
+    s2["hit"] = (cash[["ret_open_d0_close", "ret_open_d1_close", "ret_open_d5_close"]] > 0).mean()
+    table(s2, "Cash deals: long target at d0 open (for comparison)", {"mean": "{:.2%}", "median": "{:.2%}", "hit": "{:.0%}"})
+
 # the user's proposed rule
 rule = d[d.cap_open < 0.5]
 md.append(f"\n**User rule 'enter only if <50% repriced' at the d0 open**: triggers on {len(rule)} of {len(d)} deals "
@@ -154,7 +170,8 @@ fig, ax = plt.subplots(figsize=(7.2, 3.0))
 ax.hist(hrs, bins=np.arange(5, 23, 0.5), color=BLUE, edgecolor=SURF, lw=1.5)
 ax.axvspan(9.5, 16, color=GRID, alpha=0.5, lw=0)
 ax.text(12.75, ax.get_ylim()[1] * 0.9, "regular session", ha="center", fontsize=8, color=INK2)
-ax.set_xlabel("hour of EDGAR acceptance (ET)")
+ax.set_xticks(range(6, 24, 2), [f"{h}:00" for h in range(6, 24, 2)])
+ax.set_xlabel("EDGAR acceptance time of the announcement filing (ET)")
 ax.set_ylabel("announcements")
 ax.set_title("Announcement filings cluster before the open and after the close")
 fig.tight_layout()
@@ -167,6 +184,11 @@ if ip.exists():
     it = pd.read_csv(ip)
     it = it[it.dq == "ok"].copy()
     it = it[it.premium.between(0.05, 2.0)]
+    # drop bad ticks / deals trading far through the offer (topping-bid speculation, misparsed offers)
+    wild = (it[["cap_react_close", "cap_reg_open", "cap_d1_close"]].abs() > 1.6).any(axis=1)
+    md.append(f"\nintraday rows dropped as implausible (|capture| > 1.6 at some checkpoint): "
+              f"{', '.join(it[wild].ticker)}  \n")
+    it = it[~wild]
     it.to_csv(OUT / "intraday_sample.csv", index=False)
     md.append(f"\nintraday sample: {len(it)} cash deals; by bar size {it.interval.value_counts().to_dict()}  \n")
     cc = ["cap_prev_bar", "cap_react_open", "cap_react_close", "cap_+5m", "cap_+15m", "cap_+30m", "cap_+60m",
@@ -175,6 +197,21 @@ if ip.exists():
     t["all"] = it[[c for c in cc if c in it]].median()
     t["n"] = it[[c for c in cc if c in it]].count()
     table(t, "Median intraday capture around the first reaction (by bar size)", {c: "{:.3f}" for c in t if c != "n"})
+    # late-but-legal entries: end of the first bar after the news (and +60 min), exit at the regular open
+    # (only meaningful when the reaction happened outside regular hours)
+    ext = it[it.react_session.isin(["pre", "post", "overnight"])]
+    rows = []
+    for (sess, iv), g in ext.groupby(["react_session", "interval"]):
+        for col in ("ret_react_close_to_reg_open", "ret_react_close_to_reg_close", "ret_react_close_to_d1_close"):
+            r = g[col].dropna()
+            if len(r):
+                rows.append({"session": sess, "bars": iv, "trade": col.replace("ret_", ""), "n": len(r),
+                             "mean": r.mean(), "median": r.median(), "hit": (r > 0).mean(),
+                             "t": r.mean() / (r.std(ddof=1) / np.sqrt(len(r))) if len(r) > 2 else np.nan})
+    if rows:
+        table(pd.DataFrame(rows).set_index(["session", "bars", "trade"]),
+              "Enter at the end of the first bar after the news (extended hours), exit later",
+              {"mean": "{:.2%}", "median": "{:.2%}", "hit": "{:.0%}", "t": "{:.2f}"})
     lag = it.edgar_lag_min
     md.append(f"\nEDGAR acceptance minus first price reaction (minutes): median {lag.median():.1f}, "
               f"share where price reacted before the EDGAR filing {(lag > 0).mean():.0%} (n={lag.notna().sum()})  \n")

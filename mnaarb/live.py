@@ -19,6 +19,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from datetime import time as dtime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -170,24 +171,27 @@ def fetch_release_text(url: str) -> str:
     return extract.html_to_text(body.decode("utf-8", errors="replace")) if body else ""
 
 
-def last_price(symbol: str) -> tuple[float | None, float | None]:
-    """(last trade incl. extended hours, previous regular close) from Yahoo 1m bars."""
+def last_price(symbol: str, news_time: datetime | None = None) -> tuple[float | None, float | None]:
+    """(last trade incl. extended hours, last regular-session close before the news) from Yahoo 1m bars."""
     now = _now()
-    df = prices.yahoo_chart(symbol, now - timedelta(days=4), now + timedelta(minutes=1), "1m", prepost=True, ttl=0)
+    news_time = news_time or now
+    df = prices.yahoo_chart(symbol, now - timedelta(days=5), now + timedelta(minutes=1), "1m", prepost=True, ttl=0)
     if df.empty:
         return None, None
-    meta = df.attrs.get("meta", {})
-    return float(df["close"].iloc[-1]), meta.get("chartPreviousClose") or meta.get("previousClose")
+    t = df.index.time
+    reg = df[(t >= dtime(9, 30)) & (t < dtime(16, 0)) & (df.index < news_time)]
+    return float(df["close"].iloc[-1]), (float(reg["close"].iloc[-1]) if len(reg) else None)
 
 
-def evaluate(text: str, target: str, max_capture: float = 0.5, min_remaining: float = 0.03) -> dict:
-    """Capture-ratio signal for a detected announcement."""
+def evaluate(text: str, target: str, max_capture: float = 0.5, min_remaining: float = 0.03,
+             news_time: datetime | None = None) -> dict:
+    """Capture-ratio signal for a detected announcement (thresholds are the user's rule, not a validated edge)."""
     terms = extract.extract_terms(text)
     out = {"target": target, **{k: terms.get(k) for k in ("consideration", "cash", "ratio", "cvr", "premium_pct")}}
     if terms.get("consideration") != "cash":
         out["decision"] = "skip:not_all_cash"  # stock legs need a live acquirer quote + hedge; see README
         return out
-    last, prev = last_price(target)
+    last, prev = last_price(target, news_time)
     if not last or not prev:
         out["decision"] = "skip:no_quote"
         return out
@@ -195,7 +199,12 @@ def evaluate(text: str, target: str, max_capture: float = 0.5, min_remaining: fl
     cap = (last - prev) / (offer - prev) if offer != prev else float("nan")
     remaining = offer / last - 1
     out.update(last=last, prev_close=prev, capture=cap, remaining=remaining)
-    out["decision"] = "BUY" if (cap < max_capture and remaining > min_remaining) else "skip:repriced"
+    if remaining <= min_remaining:
+        out["decision"] = "skip:no_remaining_move"
+    elif not cap < max_capture:
+        out["decision"] = "skip:repriced"
+    else:
+        out["decision"] = "BUY"
     return out
 
 

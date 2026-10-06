@@ -25,9 +25,27 @@ with open(out) as f:
     existing = list(csv.DictReader(f))
 have = {(r["cik"], r["pr_date"]) for r in existing}
 recent_ciks = {r["cik"] for r in existing if (r["pr_date"] or "0") >= since.isoformat()}
+# Pre-filter with EDGAR full-text search: only companies whose recent filings contain target-side
+# deal language. Most DEFA14A/425 filers are routine proxy or acquirer filings.
+phrases = ['"to be acquired by"', '"per share in cash"', '"merge with and into the Company"',
+           '"definitive agreement to be acquired"', '"tender offer" "per share"']
+hit_ciks: set[str] = set()
+for q in phrases:
+    frm = 0
+    while True:
+        d = edgar.efts_search(q, forms="8-K,DEFA14A,SC14D9C,425,SC TO-C", start=since.isoformat(), page_from=frm)
+        if not d:
+            break
+        hits = d["hits"]["hits"]
+        for h in hits:
+            hit_ciks.update(str(int(c)) for c in h["_source"]["ciks"])
+        frm += len(hits)
+        if not hits or frm >= min(d["hits"]["total"]["value"], 1000):
+            break
+print(len(hit_ciks), "companies with target-side deal language since", since, flush=True)
 first: dict[str, dict] = {}
 for r in sorted(rows, key=lambda r: r["date"]):
-    if int(r["cik"]) in listed and r["cik"] not in recent_ciks:
+    if int(r["cik"]) in listed and r["cik"] not in recent_ciks and str(int(r["cik"])) in hit_ciks:
         first.setdefault(r["cik"], r)
 deals = [{"cik": r["cik"], "company": r["company"], "anchor_form": r["form"],
           "anchor_date": date.fromisoformat(r["date"]), "deal_id": f"{r['cik']}-{r['date']}"} for r in first.values()]
